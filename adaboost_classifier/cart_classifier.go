@@ -124,7 +124,7 @@ func (trainer *CartClassifierTrainer) TrainClassifier(data_set *mlearn.DataSet, 
     trainer.weights = weights
 
     // zero target impurity is not tolerant to float rounding errors
-    const minTargetImpurity = 10e-6
+    const minTargetImpurity = 10e-7
     if trainer.options.TargetImpurity < minTargetImpurity {
         trainer.options.TargetImpurity = minTargetImpurity
     }
@@ -236,7 +236,7 @@ func (tr *CartClassifierTrainer) makeNode(data_set *mlearn.DataSet, arg_sorted_s
 
 func (tr *CartClassifierTrainer) filterSamples(data_set *mlearn.DataSet, arg_sorted_samples [][]int, filtered_samples_buffer [][]int,
                                                filter_val float64, split_feature, split_pos int) ([][]int, [][]int) {
-    filtered_samples_left  := /*make([][]int, data_set.FeaturesNum*2)*/ filtered_samples_buffer
+    filtered_samples_left  := filtered_samples_buffer
     filtered_samples_right := filtered_samples_left[data_set.FeaturesNum:]
     filtered_samples_left   = filtered_samples_left[:data_set.FeaturesNum]
 
@@ -250,24 +250,15 @@ func (tr *CartClassifierTrainer) filterSamples(data_set *mlearn.DataSet, arg_sor
         for _, i := range arg_sorted_samples[j] {
             if data_set.SamplesByFeature[split_feature][i] < filter_val {
                 if filtered_left_samples_count >= len(filtered_left_samples_feature) {
-                    //fmt.Printf("A %v %v\n", filtered_left_samples_count, len(filtered_left_samples_feature))
-                    //panic("fuck")
-                    //filtered_left_samples_count--
                     filtered_left_samples_count++
                     continue
                 }
                 filtered_left_samples_feature[filtered_left_samples_count] = i
                 filtered_left_samples_count++
             } else {
-                //fmt.Printf("-- %v %v\n", len(filtered_right_samples_feature), filtered_right_samples_count)
                 filtered_right_samples_feature[filtered_right_samples_count] = i
                 filtered_right_samples_count++
             }
-        }
-
-        if filtered_right_samples_count != len(arg_sorted_samples[0]) - split_pos - 1 {
-            fmt.Printf("-- (%v %v) (%v %v) %v\n", filtered_left_samples_count, split_pos+1,
-                filtered_right_samples_count, len(arg_sorted_samples[0]) - split_pos - 1, len(arg_sorted_samples[0]))
         }
 
         filtered_samples_left[j]  = filtered_left_samples_feature
@@ -312,7 +303,7 @@ func minInt(x, y int) int {
 func (tr *CartClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sorted_samples [][]int, classes_dist []float64, sum_weight float64) (
                                                 best_split_feature int, split_val float64, parts_info splitPartsInfo) {
     const parallelTreadsCount = 4
-    const minimumSamplesForParallel = 1024
+    const minimumSamplesForParallel = 2048
 
     best_split_feature = -2
     best_impurity := 1.0
@@ -364,10 +355,6 @@ func (tr *CartClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sor
         }
     }
 
-    //fmt.Printf("-- %v\n", best_split_feature)
-    //fmt.Println(len(arg_sorted_samples[best_split_feature]))
-    //fmt.Printf("-> %v\n", (split_pos))
-
     split_left_id  := arg_sorted_samples[best_split_feature][split_pos]
     split_right_id := arg_sorted_samples[best_split_feature][split_pos + 1]
 
@@ -414,14 +401,17 @@ func (tr *CartClassifierTrainer) findBestSplitPosition(data_set *mlearn.DataSet,
     best_split_impurity = 1.0
     best_split_pos = -1
 
+    // initialize left classes distribution
     left_classes_dist := tr.classesDistPool.Get().([]float64)
     for i := range left_classes_dist { left_classes_dist[i] = 0 }
     left_part_weight  := float64(0.0)
 
+    // initialize right classes distribution
     right_classes_dist := tr.classesDistPool.Get().([]float64)
     copy(right_classes_dist, classes_dist)
     right_part_weight := sum_weight
 
+    prev_feature_val := data_set.SamplesByFeature[cur_feature][cur_subset_indices[0]]
     for i := 0; i < len(cur_subset_indices)-1; i++ {
         sample_index := cur_subset_indices[i]
         next_sample_index := cur_subset_indices[i+1]
@@ -435,9 +425,11 @@ func (tr *CartClassifierTrainer) findBestSplitPosition(data_set *mlearn.DataSet,
         right_classes_dist[c] -= w
         right_part_weight     -= w
 
-        if data_set.SamplesByFeature[cur_feature][sample_index] >= data_set.SamplesByFeature[cur_feature][next_sample_index] {
+        next_feature_val := data_set.SamplesByFeature[cur_feature][next_sample_index]
+        if prev_feature_val == next_feature_val {
             continue
         }
+        prev_feature_val = next_feature_val
 
         left_impurity  := giniImpurity(left_classes_dist, left_part_weight)
         right_impurity := giniImpurity(right_classes_dist, right_part_weight)
@@ -446,9 +438,7 @@ func (tr *CartClassifierTrainer) findBestSplitPosition(data_set *mlearn.DataSet,
         left_part_class  := argmax(left_classes_dist)
         right_part_class := argmax(right_classes_dist)
 
-        //fmt.Printf("impurity %v %v %v %v\n", best_split_pos, split_impurity, left_classes_dist, right_classes_dist)
-
-        if split_impurity <= best_split_impurity /*&& left_part_class != right_part_class*/ {
+        if split_impurity <= best_split_impurity {
             best_split_impurity = split_impurity
             best_split_pos = i
 
@@ -485,10 +475,7 @@ func giniImpurity(classes_portions []float64, sum_weight float64) float64 {
         sqSum += classes_portions[i] * classes_portions[i]
     }
 
-    impurity := 1.0 - sqSum / (sum_weight * sum_weight)
-    if impurity < 0 { impurity = 0 }
-
-    return impurity
+    return 1.0 - sqSum / (sum_weight * sum_weight)
 }
 
 

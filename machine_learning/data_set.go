@@ -7,10 +7,9 @@ import (
     "strings"
     "strconv"
     "sort"
+    "math"
 
     stat "github.com/gonum/stat"
-    "math"
-    "fmt"
 )
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -84,9 +83,7 @@ func LoadDataSetFromFile(fileName string, params DataSetLoaderParams) (ds *DataS
         for i := range sample {
             ds.SamplesByFeature[i] = append(ds.SamplesByFeature[i], sample[i])
         }
-        //cur_sample++
 
-        //ds.Samples = append(ds.Samples, sample)
         ds.Classes = append(ds.Classes, int(class_val))
     }
 
@@ -148,55 +145,60 @@ func (data_set *DataSet) GenerateArgOrderByFeatures() {
 }
 
 
-func (DataSet *DataSet) calculateCFS(features_correlation [][]float64, answer_correlation []float64,
-                                     features_subset []int, features_subset_mask []bool) float64 {
-
-    var d float64
-
+func calculateCFS(features_correlation [][]float64, answer_correlation []float64,
+                                     features_subset []int) float64 {
     var ans_corr_sum float64
-    for i, id := range features_subset {
-        if !features_subset_mask[i] { continue }
-
-        d += 1.0
+    for _, id := range features_subset {
         ans_corr_sum += math.Abs(answer_correlation[id])
     }
 
     var features_corr_sum float64
-    for i, idi := range features_subset {
-        for j, idj := range features_subset {
-            if !features_subset_mask[j] || !features_subset_mask[i] { continue }
-
-            features_corr_sum += math.Abs(features_correlation[idi][idj])
+    for _, idi := range features_subset {
+        for _, idj := range features_subset {
+            features_corr_sum += features_correlation[idi][idj]
         }
     }
 
+    d := float64(len(features_subset))
+    //fmt.Printf("/ %v %v\n", ans_corr_sum, features_corr_sum)
     return ans_corr_sum / math.Sqrt(d + features_corr_sum)
 }
 
 
-func copyIntSliceSubset(slice []int, mask []bool) []int {
-    filtered_slice := make([]int, 0, len(slice))
-
-    for i := range slice {
-        if !mask[i] {
-            continue
-        }
-
-        filtered_slice = append(filtered_slice, slice[i])
+func (data_set *DataSet) recursivelyMaximizeCSF(features_correlation [][]float64, answer_correlation []float64,
+                                                features_subset []int, features_count int, bestCSF float64) (float64, []int) {
+    if len(features_subset) == features_count {
+        return calculateCFS(features_correlation, answer_correlation, features_subset), features_subset
     }
 
-    return filtered_slice
+    var best_features_subset []int
+    for i := features_subset[features_count-1]+1; i < data_set.FeaturesNum; i++ {
+        features_subset[features_count] = i
+
+        csf, next_features_subset :=
+            data_set.recursivelyMaximizeCSF(features_correlation, answer_correlation, features_subset, features_count+1, bestCSF)
+
+        if csf > bestCSF {
+            bestCSF = csf
+            if best_features_subset == nil {
+                best_features_subset = make([]int, len(features_subset))
+            }
+            copy(best_features_subset, next_features_subset)
+        }
+    }
+
+    return bestCSF, best_features_subset
 }
 
 
-func (data_set *DataSet) FilterFeaturesWithCFS() []int {
+func (data_set *DataSet) calculateCorrelations() (features_correlation [][]float64, answer_correlation []float64) {
     // prepare data
-    features_correlation := make([][]float64, data_set.FeaturesNum)
+    features_correlation = make([][]float64, data_set.FeaturesNum)
     for i := range features_correlation {
         features_correlation[i] = make([]float64, data_set.FeaturesNum)
     }
 
-    answer_correlation := make([]float64, data_set.FeaturesNum)
+    answer_correlation = make([]float64, data_set.FeaturesNum)
     answers := make([]float64, len(data_set.Classes))
     for i := range data_set.Classes {
         answers[i] = float64(data_set.Classes[i])
@@ -205,58 +207,35 @@ func (data_set *DataSet) FilterFeaturesWithCFS() []int {
     // calculate correlations
     for i := range data_set.SamplesByFeature {
         for j := 0; j < i; j++ {
-            corr := stat.Correlation(data_set.SamplesByFeature[i], data_set.SamplesByFeature[j], nil)
+            corr := math.Abs(stat.Correlation(data_set.SamplesByFeature[i], data_set.SamplesByFeature[j], nil))
             features_correlation[i][j] = corr
             features_correlation[j][i] = corr
         }
     }
 
     for i := range data_set.SamplesByFeature {
-        answer_correlation[i] = stat.Correlation(data_set.SamplesByFeature[i], answers, nil)
+        answer_correlation[i] = math.Abs(stat.Correlation(data_set.SamplesByFeature[i], answers, nil))
     }
 
-    // now maximize CFS
-    maxCFS := 0.0
-    var best_features_subset []int
+    return
+}
 
-    features_subset := make([]int, data_set.FeaturesNum)
-    features_subset_mask := make([]bool, data_set.FeaturesNum)
+
+func (data_set *DataSet) SelectFeaturesWithCFS(features_count int) []int {
+    features_correlation, answer_correlation := data_set.calculateCorrelations()
+
+    features_subset := make([]int, features_count)
     for i := range features_subset {
         features_subset[i] = i
-        features_subset_mask[i] = true
     }
 
-    for d := 0; d < 50; d++ {
-        prev_i := 0
-        best_i := 0
-        var localMaxCFS float64
-
-        for i := range features_subset {
-            features_subset_mask[prev_i] = true
-            features_subset_mask[i] = false
-            prev_i = i
-
-            cfs := data_set.calculateCFS(features_correlation, answer_correlation, features_subset, features_subset_mask)
-            if cfs > localMaxCFS {
-                localMaxCFS = cfs
-                best_i = i
-            }
-        }
-        features_subset_mask[prev_i] = true
-
-        if localMaxCFS > maxCFS {
-            fmt.Printf("%v: %v > %v\n", d, localMaxCFS, maxCFS)
-            maxCFS = localMaxCFS
-            features_subset_mask[best_i] = false
-            best_features_subset = copyIntSliceSubset(features_subset, features_subset_mask)
-        }
-
-        features_subset = append(features_subset[:best_i], features_subset[best_i+1:]...)
-        features_subset_mask = append(features_subset_mask[:best_i], features_subset_mask[best_i+1:]...)
-    }
-
-    fmt.Println(len(best_features_subset))
+    _, best_features_subset := data_set.recursivelyMaximizeCSF(features_correlation, answer_correlation, features_subset, 1, 0)
     return best_features_subset
+}
+
+
+func (data_set *DataSet) SelectFeaturesWithReasonableDispersion(dispersion float64) []int {
+    return make([]int, 1)
 }
 
 

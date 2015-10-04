@@ -11,6 +11,11 @@ import (
 
 	adaboost "datamining-hw/adaboost_classifier"
 	mlearn "datamining-hw/machine_learning"
+
+    "github.com/gonum/plot"
+    "github.com/gonum/plot/plotter"
+    "github.com/gonum/plot/plotutil"
+    "github.com/gonum/plot/vg"
 )
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -19,7 +24,7 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU() * 2)
 
 	pMaxTreeHeight := flag.Int("tree_height", 5, "maximum height of base model trees")
-	pNumBaseModels := flag.Int("num_estimators", 50, "maximum number of base models (estimator) used in adaboosting")
+	pNumBaseModels := flag.Int("num_estimators", 30, "maximum number of base models (estimator) used in adaboosting")
     memprofile     := flag.String("memprofile", "", "write memory profile to specified file")
     cpuprofile     := flag.String("cpuprofile", "", "write cpu profile to specified file")
 	flag.Parse()
@@ -38,12 +43,16 @@ func main() {
 	train_dataset, test_dataset := loadTrainDataset(), loadTestDataset()
 	train_dataset.GenerateArgOrderByFeatures()
 
-    fmt.Println("performing CFS feature filtering ...")
-    filtered_features := train_dataset.FilterFeaturesWithCFS()
-    train_dataset.SubsetFeatures(filtered_features)
-    test_dataset.SubsetFeatures(filtered_features)
+    //fmt.Println("performing CFS feature filtering ...")
+    //filtered_features := train_dataset.SelectFeaturesWithCFS(6)
+    //fmt.Println(filtered_features)
+    //train_dataset.SubsetFeatures(filtered_features)
+    //test_dataset.SubsetFeatures(filtered_features)
 
-	runAdaboostClassifier(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
+    test_results, ref_f1 := testEmbeddedFeaturesFiltering(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
+    drawEmbeddedFeaturesFilteringResults(test_results, ref_f1, "embedded_filtering.png")
+
+	//testAdaboostClassifier(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
 
     // enabling memory profiling
     writeMemProfile(memprofile)
@@ -81,16 +90,13 @@ func writeMemProfile(memprofile *string) {
 }
 
 
-func runAdaboostClassifier(numBaseModels, maxTreeHeight int, train_dataset, test_dataset *mlearn.DataSet) {
-    fmt.Println("training classifier ...")
-    cartTrainer := adaboost.NewCARTClassifierTrainer(train_dataset)
-    baseModelTrainer := func(dataSet *mlearn.DataSet, weights []float64, step int) mlearn.BaseEstimator {
-        maxDepth := maxTreeHeight
-        return cartTrainer.TrainClassifier(dataSet, weights,
-            adaboost.CARTClassifierTrainOptions{ MaxDepth: int(maxDepth), MinElementsInLeaf: 10})
-    }
+func testAdaboostClassifier(numBaseModels, maxTreeHeight int, train_dataset, test_dataset *mlearn.DataSet) {
+    fmt.Println("training adaboost classifier over CART trees ...")
+    cartTrainer := adaboost.NewCARTClassifierTrainer(train_dataset,
+        adaboost.CARTClassifierTrainOptions{ MaxDepth: int(maxTreeHeight), MinElementsInLeaf: 10})
 
-    classifier := adaboost.TrainAdaboostClassifier(train_dataset, baseModelTrainer,
+    adaboostTrainer := adaboost.NewAdaboostClassifierTrainer(cartTrainer)
+    classifier := adaboostTrainer.TrainClassifier(train_dataset,
         adaboost.AdaboostClassifierTrainOptions{MaxEstimators: numBaseModels})
 
     fmt.Println("predicting ...")
@@ -101,4 +107,101 @@ func runAdaboostClassifier(numBaseModels, maxTreeHeight int, train_dataset, test
 
     precision, recall, f1 := mlearn.PrecisionRecallF1(predictions, test_dataset.Classes, test_dataset.ClassesNum)
     fmt.Printf("\nprecision: %v  recall: %v  f1: %v \n", precision, recall, f1)
+}
+
+
+
+type testEmbeddedFeaturesFilteringResult struct {
+    FeaturesCount int
+    F1 float64
+}
+
+
+func testEmbeddedFeaturesFiltering(numBaseModels, maxTreeHeight int, train_dataset, test_dataset *mlearn.DataSet) (
+                                    []testEmbeddedFeaturesFilteringResult, float64) {
+
+    fmt.Println("training adaboost classifier with embedded features filtering ...")
+    cartTrainer := adaboost.NewCARTClassifierTrainer(train_dataset,
+        adaboost.CARTClassifierTrainOptions{ MaxDepth: int(maxTreeHeight), MinElementsInLeaf: 10, EnableEmbeddedFeaturesRanking: true})
+
+    adaboostTrainer := adaboost.NewAdaboostClassifierTrainer(cartTrainer)
+    classifier := adaboostTrainer.TrainClassifier(train_dataset,
+        adaboost.AdaboostClassifierTrainOptions{MaxEstimators: numBaseModels, EnableEmbeddedFeaturesRanking: true})
+    ranked_features := adaboostTrainer.GetRankedFeatures()
+
+    fmt.Println("predicting ...")
+    predictions := make([]int, len(test_dataset.Classes))
+    for i := range predictions {
+        predictions[i] = classifier.PredictProbe(test_dataset.GetSample(i))
+    }
+
+    precision, recall, ref_f1 := mlearn.PrecisionRecallF1(predictions, test_dataset.Classes, test_dataset.ClassesNum)
+    fmt.Printf("reference precision: %.3v  recall: %v  f1: %.3v \n\n", precision, recall, ref_f1)
+
+    var test_results []testEmbeddedFeaturesFilteringResult
+    for j := 10; j < test_dataset.FeaturesNum; j++ {
+        fmt.Printf("now training again using only %v of selected features ...\n", j)
+        selected_features := ranked_features[:j]
+        fmt.Println("selected features are: ")
+        fmt.Println(selected_features)
+
+        train_data_subset := &mlearn.DataSet{}
+        test_data_subset  := &mlearn.DataSet{}
+        *train_data_subset = *train_dataset
+        *test_data_subset  = *test_dataset
+        train_data_subset.SubsetFeatures(selected_features)
+        test_data_subset.SubsetFeatures(selected_features)
+
+        fmt.Println()
+        cartTrainer = adaboost.NewCARTClassifierTrainer(train_data_subset,
+            adaboost.CARTClassifierTrainOptions{ MaxDepth: int(maxTreeHeight), MinElementsInLeaf: 10})
+
+        adaboostTrainer = adaboost.NewAdaboostClassifierTrainer(cartTrainer)
+        classifier = adaboostTrainer.TrainClassifier(train_data_subset,
+            adaboost.AdaboostClassifierTrainOptions{MaxEstimators: numBaseModels})
+
+        fmt.Println("predicting ...")
+        predictions = make([]int, len(test_data_subset.Classes))
+        for i := range predictions {
+            predictions[i] = classifier.PredictProbe(test_data_subset.GetSample(i))
+        }
+
+        precision, recall, f1 := mlearn.PrecisionRecallF1(predictions, test_dataset.Classes, test_dataset.ClassesNum)
+        fmt.Printf("precision: %.3v  recall: %.3v  f1: %.3v \n", precision, recall, f1)
+
+        test_results = append(test_results, testEmbeddedFeaturesFilteringResult{FeaturesCount: j, F1: f1})
+    }
+
+    return test_results, ref_f1
+}
+
+
+func drawEmbeddedFeaturesFilteringResults(results []testEmbeddedFeaturesFilteringResult, refF1 float64, fileName string) {
+    fmt.Println("plotting ...")
+
+    p, err := plot.New()
+    if err != nil { panic(err) }
+
+    p.Title.Text = "Adaboost: Embedded features filtering test"
+    p.X.Label.Text = "Selected features count"
+    p.Y.Label.Text = "F1"
+
+    var resultPoints plotter.XYs
+    for _, nextResult := range results {
+        resultPoints = append(resultPoints,
+                struct { X, Y float64 } { float64(nextResult.FeaturesCount), nextResult.F1 })
+    }
+
+    refPoints := make(plotter.XYs, 2)
+    refPoints[0] = struct { X, Y float64 } { float64(results[0].FeaturesCount), refF1 }
+    refPoints[1] = struct { X, Y float64 } { float64(results[len(results)-1].FeaturesCount), refF1 }
+
+    err = plotutil.AddLinePoints(p,
+        "F1 with selected features", resultPoints,
+        "reference F1 with all features", refPoints)
+    if err != nil { panic(err) }
+
+    if err := p.Save(12*vg.Inch, 12*vg.Inch, fileName); err != nil {
+        panic(err)
+    }
 }

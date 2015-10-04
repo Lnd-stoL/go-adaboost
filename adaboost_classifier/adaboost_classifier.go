@@ -4,17 +4,16 @@ package adaboost_classifier
 import (
     "fmt"
     "math"
+    "sort"
+
     mlearn "datamining-hw/machine_learning"
 )
 
 //----------------------------------------------------------------------------------------------------------------------
 
-type BaseEstimatorTrainerDelegate func(
-    dataSet *mlearn.DataSet, weights []float64, step int) mlearn.BaseEstimator
-
 
 type AdaboostClassifier struct {
-    base_estimators  []mlearn.BaseEstimator
+    base_estimators  []mlearn.BaseClassifier
     combination_coeffs []float64
     classes_num int
 }
@@ -23,26 +22,38 @@ type AdaboostClassifier struct {
 type AdaboostClassifierTrainOptions struct {
     MaxEstimators int
     TargetError float64
+    EnableEmbeddedFeaturesRanking bool
 }
 
 
-type adaboostClassifierTrainer struct {
+type AdaboostClassifierTrainer struct {
     prediction []int
     weights    []float64
 
-    baseModelTrainer BaseEstimatorTrainerDelegate
+    baseModelTrainer mlearn.ClassifierTrainer
     options AdaboostClassifierTrainOptions
+
+    EmbeddedFeaturesRank []float64
 }
 
 
-func TrainAdaboostClassifier(data_set *mlearn.DataSet,
-                             baseEstimatorTrainer BaseEstimatorTrainerDelegate,
-                             options AdaboostClassifierTrainOptions) *AdaboostClassifier {
+func NewAdaboostClassifierTrainer(baseEstimatorTrainer mlearn.ClassifierTrainer) *AdaboostClassifierTrainer {
+    trainer := &AdaboostClassifierTrainer{baseModelTrainer: baseEstimatorTrainer}
+    return trainer
+}
+
+
+func (trainer *AdaboostClassifierTrainer) TrainClassifier(data_set *mlearn.DataSet,
+                                                          options AdaboostClassifierTrainOptions) *AdaboostClassifier {
 
     classifier := &AdaboostClassifier{classes_num: data_set.ClassesNum}
-    trainer := adaboostClassifierTrainer{options: options, baseModelTrainer: baseEstimatorTrainer}
+    trainer.options = options
     trainer.prediction = make([]int, data_set.SamplesNum)
     trainer.weights = make([]float64, data_set.SamplesNum)
+
+    if trainer.options.EnableEmbeddedFeaturesRanking {
+        trainer.EmbeddedFeaturesRank = make([]float64, data_set.FeaturesNum)
+    }
 
     // generate initial equal normalized weights
     for i := range trainer.weights {
@@ -57,7 +68,7 @@ func TrainAdaboostClassifier(data_set *mlearn.DataSet,
             classifier.combination_coeffs = append(classifier.combination_coeffs, b)
 
             if (i+1)%10 == 0 || i == options.MaxEstimators-1 {
-                fmt.Printf("adaboost: trained base estimator #%v with self err = %v\n", len(classifier.base_estimators), err)
+                fmt.Printf("adaboost: trained base estimator #%v with self err = %.4v\n", len(classifier.base_estimators), err)
             }
         }
     }
@@ -88,8 +99,15 @@ func (ac *AdaboostClassifier) PredictProbe(probe []float64) int {
 }
 
 
-func (trainer *adaboostClassifierTrainer) trainNextBaseEstimator(data_set *mlearn.DataSet, step int) (float64, mlearn.BaseEstimator, float64) {
-    base_estimator := trainer.baseModelTrainer(data_set, trainer.weights, step)
+func (trainer *AdaboostClassifierTrainer) trainNextBaseEstimator(data_set *mlearn.DataSet, step int) (
+                                                                 float64, mlearn.BaseClassifier, float64) {
+    base_estimator := trainer.baseModelTrainer.TrainClassifierWithWeights(data_set, trainer.weights)
+    // embedded features ranking
+    if (trainer.options.EnableEmbeddedFeaturesRanking) {
+        for j := range trainer.EmbeddedFeaturesRank {
+            trainer.EmbeddedFeaturesRank[j] += trainer.baseModelTrainer.GetFeaturesRank()[j]
+        }
+    }
 
     // save the predictions for later use
     sample := make([]float64, data_set.FeaturesNum)
@@ -139,3 +157,21 @@ func (trainer *adaboostClassifierTrainer) trainNextBaseEstimator(data_set *mlear
 
     return b, base_estimator, err
 }
+
+
+func (trainer *AdaboostClassifierTrainer) GetRankedFeatures() []int {
+    indices := make([]int, len(trainer.EmbeddedFeaturesRank))
+    for i := range indices {
+        indices[i] = i
+    }
+
+    sort.Sort(mlearn.FeaturesRankSorter{FeaturesRank: trainer.EmbeddedFeaturesRank, Indices: indices})
+    return indices
+}
+
+
+func (trainer *AdaboostClassifierTrainer) GetFeaturesRank() []float64 {
+    return trainer.EmbeddedFeaturesRank
+}
+
+//----------------------------------------------------------------------------------------------------------------------

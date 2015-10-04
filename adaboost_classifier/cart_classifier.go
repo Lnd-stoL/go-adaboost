@@ -4,6 +4,8 @@ package adaboost_classifier
 import (
     "fmt"
     "sync"
+    "sort"
+
     mlearn "datamining-hw/machine_learning"
 )
 
@@ -18,15 +20,18 @@ type CARTClassifierTrainOptions struct {
     MaxDepth int
     TargetImpurity float64
     MinElementsInLeaf int
+    EnableEmbeddedFeaturesRanking bool
 }
 
 
-type CartClassifierTrainer struct {
+type CARTClassifierTrainer struct {
     weights []float64
-    options CARTClassifierTrainOptions
 
     sampleIndicesPool sync.Pool
     classesDistPool   sync.Pool
+
+    Options CARTClassifierTrainOptions
+    EmbeddedFeaturesRank []float64
 }
 
 
@@ -59,7 +64,7 @@ type (
     testSplitInfo struct {
         impurity float64
         split_pos int
-        split_classes splitPartsInfo
+        split_parts splitPartsInfo
         feature_id int
     }
 
@@ -95,8 +100,8 @@ func (cc *CARTClassifier) predictProbe(probe []float64, node *treeNode) int {
 }
 
 
-func NewCARTClassifierTrainer(data_set *mlearn.DataSet) *CartClassifierTrainer {
-    trainer := CartClassifierTrainer{}
+func NewCARTClassifierTrainer(data_set *mlearn.DataSet, options CARTClassifierTrainOptions) *CARTClassifierTrainer {
+    trainer := CARTClassifierTrainer{Options: options}
 
     trainer.sampleIndicesPool.New = func() interface{} {
         buffer := make([]int, data_set.SamplesNum * data_set.FeaturesNum)
@@ -117,22 +122,24 @@ func NewCARTClassifierTrainer(data_set *mlearn.DataSet) *CartClassifierTrainer {
 }
 
 
-func (trainer *CartClassifierTrainer) TrainClassifier(data_set *mlearn.DataSet, weights []float64,
-                                                      options CARTClassifierTrainOptions) *CARTClassifier {
+func (trainer *CARTClassifierTrainer) TrainClassifierWithWeights(data_set *mlearn.DataSet, weights []float64) mlearn.BaseClassifier {
     classifier := &CARTClassifier{}
-    trainer.options = options
     trainer.weights = weights
 
     // zero target impurity is not tolerant to float rounding errors
     const minTargetImpurity = 10e-7
-    if trainer.options.TargetImpurity < minTargetImpurity {
-        trainer.options.TargetImpurity = minTargetImpurity
+    if trainer.Options.TargetImpurity < minTargetImpurity {
+        trainer.Options.TargetImpurity = minTargetImpurity
     }
 
     // reasonable default
     const defaultMinimalElementsInLeaf = 3
-    if trainer.options.MinElementsInLeaf == 0 {
-        trainer.options.MinElementsInLeaf = defaultMinimalElementsInLeaf
+    if trainer.Options.MinElementsInLeaf == 0 {
+        trainer.Options.MinElementsInLeaf = defaultMinimalElementsInLeaf
+    }
+
+    if trainer.Options.EnableEmbeddedFeaturesRanking {
+        trainer.EmbeddedFeaturesRank = make([]float64, data_set.FeaturesNum)
     }
 
     classifier.tree_root = trainer.buildTree(data_set)
@@ -140,7 +147,17 @@ func (trainer *CartClassifierTrainer) TrainClassifier(data_set *mlearn.DataSet, 
 }
 
 
-func (trainer *CartClassifierTrainer) buildTree(data_set *mlearn.DataSet) *treeNode {
+func (trainer *CARTClassifierTrainer) TrainClassifier(data_set *mlearn.DataSet) mlearn.BaseClassifier {
+    ident_weights := make([]float64, data_set.SamplesNum)
+    for i := range ident_weights {
+        ident_weights[i] = 1.0 / float64(data_set.SamplesNum)
+    }
+
+    return trainer.TrainClassifierWithWeights(data_set, ident_weights)
+}
+
+
+func (trainer *CARTClassifierTrainer) buildTree(data_set *mlearn.DataSet) *treeNode {
     classes_dist := trainer.classesDistPool.Get().([]float64)
     for i := range classes_dist { classes_dist[i] = 0 }
 
@@ -152,7 +169,7 @@ func (trainer *CartClassifierTrainer) buildTree(data_set *mlearn.DataSet) *treeN
         refs: 2,
         indices: data_set.ArgOrderedByFeature,
     }
-    return trainer.makeNode(data_set, &arg_ordered_samples_buffer, classes_dist, 1.0, trainer.options.MaxDepth)
+    return trainer.makeNode(data_set, &arg_ordered_samples_buffer, classes_dist, 1.0, trainer.Options.MaxDepth)
 }
 
 
@@ -164,8 +181,9 @@ func makeTerminalNode(split_feature int, split_value float64, left_class int, ri
 }
 
 
-func (tr *CartClassifierTrainer) makeNode(data_set *mlearn.DataSet, arg_sorted_samples *argSortedSamplesBuffered,
+func (tr *CARTClassifierTrainer) makeNode(data_set *mlearn.DataSet, arg_sorted_samples *argSortedSamplesBuffered,
                                           classes_dist []float64, sum_weight float64, depth int) *treeNode {
+
     split_feature, split_val, parts_info := tr.findBestSplit(data_set, arg_sorted_samples.indices, classes_dist, sum_weight)
 
     // maximum tree height exceeded
@@ -181,7 +199,7 @@ func (tr *CartClassifierTrainer) makeNode(data_set *mlearn.DataSet, arg_sorted_s
 
     new_arg_sorted_samples_buffer := tr.sampleIndicesPool.Get().([][]int)
     new_arg_sorted_samples_left, new_arg_sorted_samples_right :=
-        tr.filterSamples(data_set, arg_sorted_samples.indices, new_arg_sorted_samples_buffer, split_val,
+        tr.splitSamples(data_set, arg_sorted_samples.indices, new_arg_sorted_samples_buffer, split_val,
                          split_feature, parts_info.left_part.samplesCount-1)
 
     arg_sorted_samples.refs--
@@ -194,7 +212,7 @@ func (tr *CartClassifierTrainer) makeNode(data_set *mlearn.DataSet, arg_sorted_s
     var parallelRecursiveCalls int
 
     // the node is already pure, no need to split it recursively
-    if parts_info.left_part.impurity <= tr.options.TargetImpurity || parts_info.left_part.samplesCount < tr.options.MinElementsInLeaf {
+    if parts_info.left_part.impurity <= tr.Options.TargetImpurity || parts_info.left_part.samplesCount < tr.Options.MinElementsInLeaf {
         node.left_class = parts_info.left_part.class
     } else {
         new_arg_sorted_samples := argSortedSamplesBuffered{ indices: new_arg_sorted_samples_left, refs: 2 }
@@ -209,7 +227,7 @@ func (tr *CartClassifierTrainer) makeNode(data_set *mlearn.DataSet, arg_sorted_s
         }
     }
 
-    if parts_info.right_part.impurity <= tr.options.TargetImpurity || parts_info.right_part.samplesCount < tr.options.MinElementsInLeaf {
+    if parts_info.right_part.impurity <= tr.Options.TargetImpurity || parts_info.right_part.samplesCount < tr.Options.MinElementsInLeaf {
         node.right_class = parts_info.right_part.class
     } else {
         new_arg_sorted_samples := argSortedSamplesBuffered{ indices: new_arg_sorted_samples_right, refs: 2 }
@@ -234,8 +252,8 @@ func (tr *CartClassifierTrainer) makeNode(data_set *mlearn.DataSet, arg_sorted_s
 }
 
 
-func (tr *CartClassifierTrainer) filterSamples(data_set *mlearn.DataSet, arg_sorted_samples [][]int, filtered_samples_buffer [][]int,
-                                               filter_val float64, split_feature, split_pos int) ([][]int, [][]int) {
+func (tr *CARTClassifierTrainer) splitSamples(data_set *mlearn.DataSet, arg_sorted_samples [][]int, filtered_samples_buffer [][]int,
+                                              filter_val float64, split_feature, split_pos int) ([][]int, [][]int) {
     filtered_samples_left  := filtered_samples_buffer
     filtered_samples_right := filtered_samples_left[data_set.FeaturesNum:]
     filtered_samples_left   = filtered_samples_left[:data_set.FeaturesNum]
@@ -270,7 +288,7 @@ func (tr *CartClassifierTrainer) filterSamples(data_set *mlearn.DataSet, arg_sor
 
 
 
-func (tr *CartClassifierTrainer) findBestSplitByFeaturesSubset(data_set *mlearn.DataSet, arg_sorted_samples [][]int, features_subset [2]int,
+func (tr *CARTClassifierTrainer) findBestSplitByFeaturesChunk(data_set *mlearn.DataSet, arg_sorted_samples [][]int, features_subset [2]int,
                                                                classes_dist []float64, sum_weight float64) testSplitInfo {
     var best_split_info testSplitInfo
     best_split_info.impurity   = 1.0
@@ -278,12 +296,12 @@ func (tr *CartClassifierTrainer) findBestSplitByFeaturesSubset(data_set *mlearn.
     best_split_info.split_pos  = -3
 
     for j := features_subset[0]; j < features_subset[1]; j++ {
-        impurity, best_split_pos, best_split_classes :=
+        impurity, best_split_pos, best_split_parts :=
             tr.findBestSplitPosition(data_set, arg_sorted_samples[j], j, classes_dist, sum_weight)
 
         if impurity < best_split_info.impurity {
             best_split_info = testSplitInfo{ impurity: impurity, split_pos: best_split_pos,
-                                             split_classes: best_split_classes, feature_id: j }
+                                             split_parts: best_split_parts, feature_id: j }
         }
     }
 
@@ -300,8 +318,8 @@ func minInt(x, y int) int {
 }
 
 
-func (tr *CartClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sorted_samples [][]int, classes_dist []float64, sum_weight float64) (
-                                                best_split_feature int, split_val float64, parts_info splitPartsInfo) {
+func (tr *CARTClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sorted_samples [][]int, classes_dist []float64, sum_weight float64) (
+                                               best_split_feature int, split_val float64, parts_info splitPartsInfo) {
     const parallelTreadsCount = 4
     const minimumSamplesForParallel = 2048
 
@@ -312,12 +330,12 @@ func (tr *CartClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sor
     // really no performance profit with parallel threads
     if len(arg_sorted_samples[0]) < minimumSamplesForParallel {
         bounds := [2]int{ 0, data_set.FeaturesNum }
-        next_split_test := tr.findBestSplitByFeaturesSubset(data_set, arg_sorted_samples, bounds, classes_dist, sum_weight)
+        next_split_test := tr.findBestSplitByFeaturesChunk(data_set, arg_sorted_samples, bounds, classes_dist, sum_weight)
 
         best_impurity      = next_split_test.impurity
         best_split_feature = next_split_test.feature_id
         split_pos          = next_split_test.split_pos
-        parts_info         = next_split_test.split_classes
+        parts_info         = next_split_test.split_parts
 
     } else {
 
@@ -331,7 +349,7 @@ func (tr *CartClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sor
 
         routine := func(j int) {
             bounds := [2]int{ features_for_one_thread * j, minInt(features_for_one_thread * (j + 1), data_set.FeaturesNum) }
-            channel <- tr.findBestSplitByFeaturesSubset(data_set, arg_sorted_samples, bounds, classes_dist, sum_weight)
+            channel <- tr.findBestSplitByFeaturesChunk(data_set, arg_sorted_samples, bounds, classes_dist, sum_weight)
         }
 
         // map features subsets to workers
@@ -350,7 +368,7 @@ func (tr *CartClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sor
                 best_impurity      = next_split_test.impurity
                 best_split_feature = next_split_test.feature_id
                 split_pos          = next_split_test.split_pos
-                parts_info         = next_split_test.split_classes
+                parts_info         = next_split_test.split_parts
             }
         }
     }
@@ -364,6 +382,13 @@ func (tr *CartClassifierTrainer) findBestSplit(data_set *mlearn.DataSet, arg_sor
     parts_info.left_part.samplesCount  = split_pos + 1
     parts_info.right_part.samplesCount = len(arg_sorted_samples[best_split_feature]) - split_pos - 1
 
+    // embedded features ranking
+    if tr.Options.EnableEmbeddedFeaturesRanking {
+        impurity_improvement := giniImpurity(classes_dist, sum_weight) - best_impurity
+        tr.EmbeddedFeaturesRank[best_split_feature] += impurity_improvement
+    }
+
+    tr.classesDistPool.Put(classes_dist)
     return
 }
 
@@ -392,7 +417,7 @@ func argmax(slice []float64) int {
 }
 
 
-func (tr *CartClassifierTrainer) findBestSplitPosition(data_set *mlearn.DataSet, cur_subset_indices []int,
+func (tr *CARTClassifierTrainer) findBestSplitPosition(data_set *mlearn.DataSet, cur_subset_indices []int,
                                                         cur_feature int,
                                                         classes_dist []float64,
                                                         sum_weight float64) (best_split_impurity float64,
@@ -479,6 +504,22 @@ func giniImpurity(classes_portions []float64, sum_weight float64) float64 {
 }
 
 
+func (tr *CARTClassifierTrainer) GetRankedFeatures() []int {
+    indices := make([]int, len(tr.EmbeddedFeaturesRank))
+    for i := range indices {
+        indices[i] = i
+    }
+
+    sort.Sort(mlearn.FeaturesRankSorter{FeaturesRank: tr.EmbeddedFeaturesRank, Indices: indices})
+    return indices
+}
+
+
+func (tr *CARTClassifierTrainer) GetFeaturesRank() []float64 {
+    return tr.EmbeddedFeaturesRank
+}
+
+
 func (cc *CARTClassifier) Dump() {
     cc.dump(cc.tree_root)
 }
@@ -496,7 +537,7 @@ func (cc *CARTClassifier) dump(node *treeNode) {
 }
 
 
-func (cc *CARTClassifier) CloneEmpty() mlearn.BaseEstimator {
+func (cc *CARTClassifier) CloneEmpty() mlearn.BaseClassifier {
     clone := new(CARTClassifier)
     *clone = *cc
     clone.tree_root = nil

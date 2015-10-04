@@ -2,6 +2,6 @@
 package machine_learning
 
 
-type BaseEstimator interface {
+type BaseClassifier interface {
     PredictProbe(probe []float64) int
 }

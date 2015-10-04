@@ -23,12 +23,13 @@ import (
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU() * 2)
 
-	pMaxTreeHeight := flag.Int("tree_height", 30, "maximum height of base model trees")
-	pNumBaseModels := flag.Int("num_estimators", 100, "maximum number of base models (estimator) used in adaboosting")
+	pMaxTreeHeight := flag.Int("tree_height", 3, "maximum height of CART trees [0 - growth without limitations]")
+	pNumBaseModels := flag.Int("num_estimators", 200, "maximum number of base models (estimator) used in adaboosting")
     memprofile     := flag.String("memprofile", "", "write memory profile to specified file")
     cpuprofile     := flag.String("cpuprofile", "", "write cpu profile to specified file")
-    datasetName    := flag.String("dataset", "bupa", "selects dataset to operate on (predefined are: spam, iris, bupa, wines)")
-    trainSubset    := flag.Float64("train_subset", 1.0, "percent of the dataset used to train on (the rest is used to test)")
+    datasetName    := flag.String("dataset", "wine", "selects dataset to operate on [predefined are: spam, iris, bupa, wines]")
+    trainSubset    := flag.Float64("train_subset", 1.0, "percent of the dataset used to train on")
+    minItemsInLeaf := flag.Int("tree_min_leaf", 3, "minimum number of items in tree leafs")
     flag.Parse()
 
     // enabling CPU profiling
@@ -44,7 +45,7 @@ func main() {
 	fmt.Println("loading datasets ...")
 	train_dataset, test_dataset := loadDatasets(*datasetName)
     if train_dataset == nil || test_dataset == nil {
-        fmt.Println(os.Stderr, "can't load dataset " + *datasetName)
+        fmt.Fprintln(os.Stderr, "can't load dataset " + *datasetName)
         return
     }
 
@@ -52,7 +53,8 @@ func main() {
     train_dataset.SubsetRandomSamples(*trainSubset)
 	train_dataset.GenerateArgOrderByFeatures()
 
-    testAdaboostClassifier(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
+    //testCARTClassifier(train_dataset, test_dataset)
+    testAdaboostClassifier(*pNumBaseModels, *pMaxTreeHeight, *minItemsInLeaf, train_dataset, test_dataset)
 
     //fmt.Println("performing CFS feature filtering ...")
     //filtered_features := train_dataset.SelectFeaturesWithCFS(6)
@@ -124,10 +126,28 @@ func writeMemProfile(memprofile *string) {
 }
 
 
-func testAdaboostClassifier(numBaseModels, maxTreeHeight int, train_dataset, test_dataset *mlearn.DataSet) {
+func testCARTClassifier(train_dataset, test_dataset *mlearn.DataSet) {
+    fmt.Println("testing CART classifier itself ...")
+    cartTrainer := adaboost.NewCARTClassifierTrainer(train_dataset,
+        adaboost.CARTClassifierTrainOptions{ MaxDepth: 0, MinElementsInLeaf: 1 })
+
+    classifier := cartTrainer.TrainClassifier(train_dataset)
+
+    predictions := make([]int, len(test_dataset.Classes))
+    for i := range predictions {
+        predictions[i] = classifier.PredictProbe(test_dataset.GetSample(i))
+    }
+
+    precision, recall, f1 := mlearn.PrecisionRecallF1(predictions, test_dataset.Classes, test_dataset.ClassesNum)
+    // here we expect f1 == 1.0
+    fmt.Printf("precision: %.3v  recall: %.3v  f1: %.3v \n\n", precision, recall, f1)
+}
+
+
+func testAdaboostClassifier(numBaseModels, maxTreeHeight, minLeafItems int, train_dataset, test_dataset *mlearn.DataSet) {
     fmt.Println("training adaboost classifier over CART trees ...")
     cartTrainer := adaboost.NewCARTClassifierTrainer(train_dataset,
-        adaboost.CARTClassifierTrainOptions{ MaxDepth: int(maxTreeHeight), MinElementsInLeaf: 10})
+        adaboost.CARTClassifierTrainOptions{ MaxDepth: maxTreeHeight, MinElementsInLeaf: minLeafItems})
 
     adaboostTrainer := adaboost.NewAdaboostClassifierTrainer(cartTrainer)
     classifier := adaboostTrainer.TrainClassifier(train_dataset,
@@ -169,7 +189,7 @@ func testEmbeddedFeaturesFiltering(numBaseModels, maxTreeHeight int, train_datas
     }
 
     precision, recall, ref_f1 := mlearn.PrecisionRecallF1(predictions, test_dataset.Classes, test_dataset.ClassesNum)
-    fmt.Printf("reference precision: %.3v  recall: %v  f1: %.3v \n\n", precision, recall, ref_f1)
+    fmt.Printf("reference precision: %.3v  recall: %.3v  f1: %.3v \n\n", precision, recall, ref_f1)
 
     var test_results []testEmbeddedFeaturesFilteringResult
     for j := 10; j < test_dataset.FeaturesNum; j++ {
@@ -234,7 +254,7 @@ func drawEmbeddedFeaturesFilteringResults(results []testEmbeddedFeaturesFilterin
         "reference F1 with all features", refPoints)
     if err != nil { panic(err) }
 
-    if err := p.Save(12*vg.Inch, 12*vg.Inch, fileName); err != nil {
+    if err := p.Save(8*vg.Inch, 8*vg.Inch, fileName); err != nil {
         panic(err)
     }
 }

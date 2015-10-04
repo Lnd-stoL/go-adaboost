@@ -60,16 +60,23 @@ func (trainer *AdaboostClassifierTrainer) TrainClassifier(data_set *mlearn.DataS
 		trainer.weights[i] = 1.0 / float64(data_set.SamplesNum)
 	}
 
+    var err_sum, err_count float64
     for i := 0; i < options.MaxEstimators; i++ {
-        if b, estimator, err := trainer.trainNextBaseEstimator(data_set, i); err <= options.TargetError {
+        b, estimator, err := trainer.trainNextBaseEstimator(data_set, i)
+        classifier.base_estimators = append(classifier.base_estimators, estimator)
+        classifier.combination_coeffs = append(classifier.combination_coeffs, b)
+
+        if  err <= options.TargetError {
             fmt.Printf("adaboost: boosting stopped with %v estimators; err = %.4v\n", len(classifier.base_estimators), err)
             break
         } else {
-            classifier.base_estimators = append(classifier.base_estimators, estimator)
-            classifier.combination_coeffs = append(classifier.combination_coeffs, b)
+            err_sum += err
+            err_count += 1.0
 
             if (i+1)%10 == 0 || i == options.MaxEstimators-1 {
-                fmt.Printf("adaboost: trained base estimator #%v with self err = %.4v\n", len(classifier.base_estimators), err)
+                fmt.Printf("adaboost: trained base estimator #%v with self err = %.4v\n", len(classifier.base_estimators), err_sum / err_count)
+                err_sum = 0
+                err_count = 0
             }
         }
     }
@@ -174,5 +181,3 @@ func (trainer *AdaboostClassifierTrainer) GetRankedFeatures() []int {
 func (trainer *AdaboostClassifierTrainer) GetFeaturesRank() []float64 {
     return trainer.EmbeddedFeaturesRank
 }
-
-//----------------------------------------------------------------------------------------------------------------------

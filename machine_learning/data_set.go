@@ -147,8 +147,7 @@ func (data_set *DataSet) GenerateArgOrderByFeatures() {
 }
 
 
-func calculateCFS(features_correlation [][]float64, answer_correlation []float64,
-                                     features_subset []int) float64 {
+func calculateCFS(features_correlation [][]float64, answer_correlation []float64, features_subset []int) float64 {
     var ans_corr_sum float64
     for _, id := range features_subset {
         ans_corr_sum += math.Abs(answer_correlation[id])
@@ -162,7 +161,6 @@ func calculateCFS(features_correlation [][]float64, answer_correlation []float64
     }
 
     d := float64(len(features_subset))
-    //fmt.Printf("/ %v %v\n", ans_corr_sum, features_corr_sum)
     return ans_corr_sum / math.Sqrt(d + features_corr_sum)
 }
 

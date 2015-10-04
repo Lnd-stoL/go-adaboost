@@ -127,7 +127,7 @@ func (trainer *CARTClassifierTrainer) TrainClassifierWithWeights(data_set *mlear
     trainer.weights = weights
 
     // zero target impurity is not tolerant to float rounding errors
-    const minTargetImpurity = 10e-7
+    const minTargetImpurity = 10e-9
     if trainer.Options.TargetImpurity < minTargetImpurity {
         trainer.Options.TargetImpurity = minTargetImpurity
     }

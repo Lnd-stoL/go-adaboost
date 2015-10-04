@@ -62,6 +62,7 @@ func (trainer *AdaboostClassifierTrainer) TrainClassifier(data_set *mlearn.DataS
 
     for i := 0; i < options.MaxEstimators; i++ {
         if b, estimator, err := trainer.trainNextBaseEstimator(data_set, i); err <= options.TargetError {
+            fmt.Printf("adaboost: boosting stopped with %v estimators; err = %.4v\n", len(classifier.base_estimators), err)
             break
         } else {
             classifier.base_estimators = append(classifier.base_estimators, estimator)
@@ -124,24 +125,24 @@ func (trainer *AdaboostClassifierTrainer) trainNextBaseEstimator(data_set *mlear
         }
     }
 
-    // check it to prevent math.Log domain violation
+    // check it to prevent math.Log domain violation (err == 0 means that there's nothing to boost)
     if err == 0 {
         return 1.0, base_estimator, err
     }
     b := math.Log((1.0 - err) / err) + math.Log(float64(data_set.ClassesNum) - 1.0)
 
     // update weights according to error
-    const minimalWeight float64 = 10e-7
+    const minimalWeight float64 = 10e-9
     var weights_sum float64
     for i := range trainer.weights {
         if trainer.prediction[i] != data_set.Classes[i] {
             trainer.weights[i] *= math.Exp(b)
 
-            if trainer.weights[i] < minimalWeight {   /* this is to deal with roudning errors */
+            if trainer.weights[i] < minimalWeight {   /* this is to deal with rounding errors */
                 trainer.weights[i] = 0
             }
         } else {
-            //weights[i] *= math.Exp(-b)
+            //trainer.weights[i] *= math.Exp(-b)
         }
         weights_sum += trainer.weights[i]
     }

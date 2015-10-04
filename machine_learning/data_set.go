@@ -8,6 +8,8 @@ import (
     "strconv"
     "sort"
     "math"
+    "math/rand"
+    "time"
 
     stat "github.com/gonum/stat"
 )
@@ -234,7 +236,7 @@ func (data_set *DataSet) SelectFeaturesWithCFS(features_count int) []int {
 }
 
 
-func (data_set *DataSet) SelectFeaturesWithReasonableDispersion(dispersion float64) []int {
+func (data_set *DataSet) SelectFeaturesWithDispersion(dispersion float64) []int {
     return make([]int, 1)
 }
 
@@ -255,4 +257,59 @@ func (data_set *DataSet) SubsetFeatures(features_subset []int) {
     }
 
     data_set.FeaturesNum = len(features_subset)
+}
+
+
+func randomShuffleInts(a []int) {
+    for i := range a {
+        j := rand.Intn(i + 1)
+        a[i], a[j] = a[j], a[i]
+    }
+}
+
+
+func subsetFloats(data []float64, indices []int) []float64 {
+    subset := make([]float64, len(indices))
+
+    for i, id := range indices {
+        subset[i] = data[id]
+    }
+
+    return subset
+}
+
+
+func subsetInts(data []int, indices []int) []int {
+    subset := make([]int, len(indices))
+
+    for i, id := range indices {
+        subset[i] = data[id]
+    }
+
+    return subset
+}
+
+
+func (data_set *DataSet) SubsetRandomSamples(percent float64) {
+    if percent >= 1.0 { return }
+
+    if data_set.ArgOrderedByFeature != nil {
+        panic("Not implemented")
+    }
+
+    indices := make([]int, data_set.SamplesNum)
+    for i := range indices {
+        indices[i] = i
+    }
+
+    rand.Seed(time.Now().UnixNano())
+    randomShuffleInts(indices)
+    indices_subset := indices[:int(float64(len(indices)) * percent)]
+
+    for j := range data_set.SamplesByFeature {
+        data_set.SamplesByFeature[j] = subsetFloats(data_set.SamplesByFeature[j], indices_subset)
+    }
+    data_set.Classes = subsetInts(data_set.Classes, indices_subset)
+
+    data_set.SamplesNum = len(indices_subset)
 }

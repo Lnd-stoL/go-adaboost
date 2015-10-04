@@ -23,11 +23,13 @@ import (
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU() * 2)
 
-	pMaxTreeHeight := flag.Int("tree_height", 5, "maximum height of base model trees")
-	pNumBaseModels := flag.Int("num_estimators", 30, "maximum number of base models (estimator) used in adaboosting")
+	pMaxTreeHeight := flag.Int("tree_height", 30, "maximum height of base model trees")
+	pNumBaseModels := flag.Int("num_estimators", 100, "maximum number of base models (estimator) used in adaboosting")
     memprofile     := flag.String("memprofile", "", "write memory profile to specified file")
     cpuprofile     := flag.String("cpuprofile", "", "write cpu profile to specified file")
-	flag.Parse()
+    datasetName    := flag.String("dataset", "bupa", "selects dataset to operate on (predefined are: spam, iris, bupa, wines)")
+    trainSubset    := flag.Float64("train_subset", 1.0, "percent of the dataset used to train on (the rest is used to test)")
+    flag.Parse()
 
     // enabling CPU profiling
     if *cpuprofile != "" {
@@ -40,8 +42,17 @@ func main() {
     }
 
 	fmt.Println("loading datasets ...")
-	train_dataset, test_dataset := loadTrainDataset(), loadTestDataset()
+	train_dataset, test_dataset := loadDatasets(*datasetName)
+    if train_dataset == nil || test_dataset == nil {
+        fmt.Println(os.Stderr, "can't load dataset " + *datasetName)
+        return
+    }
+
+    // preparing train set
+    train_dataset.SubsetRandomSamples(*trainSubset)
 	train_dataset.GenerateArgOrderByFeatures()
+
+    testAdaboostClassifier(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
 
     //fmt.Println("performing CFS feature filtering ...")
     //filtered_features := train_dataset.SelectFeaturesWithCFS(6)
@@ -49,31 +60,54 @@ func main() {
     //train_dataset.SubsetFeatures(filtered_features)
     //test_dataset.SubsetFeatures(filtered_features)
 
-    test_results, ref_f1 := testEmbeddedFeaturesFiltering(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
-    drawEmbeddedFeaturesFilteringResults(test_results, ref_f1, "embedded_filtering.png")
-
-	//testAdaboostClassifier(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
+    //test_results, ref_f1 := testEmbeddedFeaturesFiltering(*pNumBaseModels, *pMaxTreeHeight, train_dataset, test_dataset)
+    //drawEmbeddedFeaturesFilteringResults(test_results, ref_f1, "embedded_filtering.png")
 
     // enabling memory profiling
     writeMemProfile(memprofile)
 }
 
 
-func loadTrainDataset() *mlearn.DataSet {
-	return mlearn.LoadDataSetFromFile("./datasets/spam/spam.train.txt", mlearn.DataSetLoaderParams {
-        ClassesFirst: true,
-        ClassesFromZero: true,
-        Splitter: " ",
-    })
-}
+func loadDatasets(datasetName string) (*mlearn.DataSet, *mlearn.DataSet){
+    switch datasetName {
+    case "spam":
+        loaderParams := mlearn.DataSetLoaderParams{
+            ClassesFirst: true,
+            ClassesFromZero: true,
+            Splitter: " ",
+        }
+        return mlearn.LoadDataSetFromFile("./datasets/spam/spam.train.txt", loaderParams),
+               mlearn.LoadDataSetFromFile("./datasets/spam/spam.test.txt", loaderParams)
 
+    case "iris":
+        loaderParams := mlearn.DataSetLoaderParams{
+            ClassesFirst: false,
+            ClassesFromZero: false,
+            Splitter: ",",
+        }
+        return mlearn.LoadDataSetFromFile("./datasets/iris.data", loaderParams),
+               mlearn.LoadDataSetFromFile("./datasets/iris.data", loaderParams)
 
-func loadTestDataset() *mlearn.DataSet {
-	return mlearn.LoadDataSetFromFile("./datasets/spam/spam.test.txt", mlearn.DataSetLoaderParams {
-        ClassesFirst: true,
-        ClassesFromZero: true,
-        Splitter: " ",
-    })
+    case "bupa":
+        loaderParams := mlearn.DataSetLoaderParams{
+            ClassesFirst: false,
+            ClassesFromZero: false,
+            Splitter: ",",
+        }
+        return mlearn.LoadDataSetFromFile("./datasets/bupa.data", loaderParams),
+               mlearn.LoadDataSetFromFile("./datasets/bupa.data", loaderParams)
+
+    case "wine":
+        loaderParams := mlearn.DataSetLoaderParams{
+            ClassesFirst: true,
+            ClassesFromZero: false,
+            Splitter: ",",
+        }
+        return mlearn.LoadDataSetFromFile("./datasets/wine.data", loaderParams),
+               mlearn.LoadDataSetFromFile("./datasets/wine.data", loaderParams)
+    }
+
+    return nil, nil
 }
 
 
@@ -106,9 +140,8 @@ func testAdaboostClassifier(numBaseModels, maxTreeHeight int, train_dataset, tes
     }
 
     precision, recall, f1 := mlearn.PrecisionRecallF1(predictions, test_dataset.Classes, test_dataset.ClassesNum)
-    fmt.Printf("\nprecision: %v  recall: %v  f1: %v \n", precision, recall, f1)
+    fmt.Printf("\nprecision: %.3v  recall: %.3v  f1: %.3v \n", precision, recall, f1)
 }
-
 
 
 type testEmbeddedFeaturesFilteringResult struct {
